@@ -217,14 +217,22 @@ def curate_pinterest_images(theme: str, count: int = 15) -> list[dict]:
             failed_count += 1
             continue
 
+        # Determine if this is a real Pinterest image or Pexels fallback
+        result_id = result.get('id', '')
+        is_pinterest = result_id.startswith('pinterest_')
+        is_pexels = result_id.startswith('pexels_')
+
         curated_images.append({
-            "pexels_id": result['id'],  # Keep same format as Pexels tool for compatibility
+            "pexels_id": result_id,  # Keep same format as Pexels tool for compatibility
+            "id": result_id,
+            "pin_id": result.get('pin_id'),  # Actual Pinterest pin ID for repinning (None for Pexels)
             "url": str(local_path),  # LOCAL PATH for fast loading
             "thumbnail": result['thumbnail_url'],
             "alt": result['title'],
             "photographer": result['creator'],
             "description": result.get('description', ''),
-            "source": "Pinterest MCP",
+            "source": "Pinterest" if is_pinterest else "Pexels",
+            "is_pinterest": is_pinterest,  # Flag for UI to check
             "pinterest_url": result['source_url'],  # Original Pinterest link
         })
 
@@ -325,14 +333,21 @@ def curate_pinterest_diverse(queries: list[str], per_query: int = 4) -> list[dic
 
     for result, local_path in zip(results, local_paths):
         if local_path:
+            # Determine if this is a real Pinterest image or Pexels fallback
+            result_id = result.get('id', '')
+            is_pinterest = result_id.startswith('pinterest_')
+
             curated_images.append({
-                "pexels_id": result['id'],
+                "pexels_id": result_id,
+                "id": result_id,
+                "pin_id": result.get('pin_id'),  # Actual Pinterest pin ID for repinning
                 "url": str(local_path),
                 "thumbnail": result['thumbnail_url'],
                 "alt": result['title'],
                 "photographer": result['creator'],
                 "description": result.get('description', ''),
-                "source": "Pinterest MCP",
+                "source": "Pinterest" if is_pinterest else "Pexels",
+                "is_pinterest": is_pinterest,
                 "pinterest_url": result['source_url'],
             })
         else:

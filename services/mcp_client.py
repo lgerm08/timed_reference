@@ -246,6 +246,38 @@ class PinterestMCPClient:
 
         return result.get("images", []) if isinstance(result, dict) else []
 
+    async def save_pins_to_board(
+        self,
+        board_name: str,
+        pin_ids: list[str],
+        description: str = ""
+    ) -> dict:
+        """
+        Create a board and save pins to it.
+
+        Args:
+            board_name: Name for the new Pinterest board
+            pin_ids: List of Pinterest pin IDs to save
+            description: Optional board description
+
+        Returns:
+            Dictionary with result status and details
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        result = await self.client.call_tool(
+            "pinterest",
+            "save_pins_to_board",
+            {
+                "board_name": board_name,
+                "pin_ids": pin_ids,
+                "description": description,
+            }
+        )
+
+        return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
     async def close(self):
         """Close the connection."""
         if self.client:
@@ -283,7 +315,6 @@ def search_pinterest_sync(query: str, limit: int = 10, server_path: str = None) 
     Use this in synchronous contexts like Agno tools.
     """
     if server_path is None:
-        import os
         from pathlib import Path
         server_path = str(Path(__file__).parent.parent / "mcp_servers" / "pinterest_server.py")
 
@@ -293,3 +324,33 @@ def search_pinterest_sync(query: str, limit: int = 10, server_path: str = None) 
 
     loop = get_event_loop()
     return loop.run_until_complete(_search())
+
+
+def save_pins_to_board_sync(
+    board_name: str,
+    pin_ids: list[str],
+    description: str = "",
+    server_path: str = None
+) -> dict:
+    """
+    Synchronous wrapper for saving pins to a Pinterest board.
+
+    Args:
+        board_name: Name for the new Pinterest board
+        pin_ids: List of Pinterest pin IDs to save
+        description: Optional board description
+        server_path: Path to the Pinterest MCP server script
+
+    Returns:
+        Dictionary with result status and details
+    """
+    if server_path is None:
+        from pathlib import Path
+        server_path = str(Path(__file__).parent.parent / "mcp_servers" / "pinterest_server.py")
+
+    async def _save():
+        async with PinterestMCPClient(server_path) as client:
+            return await client.save_pins_to_board(board_name, pin_ids, description)
+
+    loop = get_event_loop()
+    return loop.run_until_complete(_save())

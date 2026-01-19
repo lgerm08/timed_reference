@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QMessageBox,
     QStackedWidget,
+    QInputDialog,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
@@ -217,6 +218,42 @@ Current user message: {self.message}"""
             self.error.emit(str(e))
 
 
+class PinterestBoardWorker(QThread):
+    """Background thread for saving pins to a Pinterest board."""
+
+    success = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, board_name: str, pin_ids: list[str], description: str = ""):
+        super().__init__()
+        self.board_name = board_name
+        self.pin_ids = pin_ids
+        self.description = description
+
+    def run(self):
+        try:
+            from services.mcp_client import save_pins_to_board_sync
+
+            print(f"[Pinterest Board] Creating board '{self.board_name}' with {len(self.pin_ids)} pins")
+            result = save_pins_to_board_sync(
+                board_name=self.board_name,
+                pin_ids=self.pin_ids,
+                description=self.description
+            )
+            print(f"[Pinterest Board] Result: {result}")
+
+            if result.get("success"):
+                self.success.emit(result)
+            else:
+                self.error.emit(result.get("error", "Unknown error"))
+
+        except Exception as e:
+            print(f"[Pinterest Board] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
 
@@ -229,6 +266,7 @@ class MainWindow(QMainWindow):
         self.current_tips = {}
         self.current_theme = ""
         self.conversation_history: list[dict] = []  # Track conversation for context
+        self._has_pinterest_pins = False  # Track if current photos are from Pinterest
 
         self._setup_ui()
 
@@ -320,12 +358,21 @@ class MainWindow(QMainWindow):
         self.start_session_button.clicked.connect(self._start_session)
         right_layout.addWidget(self.start_session_button)
 
+        # Pinterest board button - only enabled when images are from Pinterest
+        self.save_to_pinterest_button = QPushButton("Save to Pinterest Board")
+        self.save_to_pinterest_button.setEnabled(False)
+        self.save_to_pinterest_button.setMinimumHeight(40)
+        self.save_to_pinterest_button.setToolTip("Create a Pinterest board with these reference images")
+        self.save_to_pinterest_button.clicked.connect(self._save_to_pinterest_board)
+        right_layout.addWidget(self.save_to_pinterest_button)
+
         return right_panel
 
     def _return_to_chat(self):
         """Return to chat view after session ends."""
         self.view_stack.setCurrentIndex(0)
         self.start_session_button.setEnabled(len(self.current_photos) > 0)
+        self.save_to_pinterest_button.setEnabled(self._has_pinterest_pins)
         self.status_label.setText("Ready for another session")
 
     def _send_message(self):
@@ -381,10 +428,27 @@ class MainWindow(QMainWindow):
         self.current_photos = photos
         self.status_label.setText(f"Found {len(photos)} reference photos")
 
+        # Check if photos are from Pinterest (have valid pin_ids)
+        pinterest_pins = [p for p in photos if p.get('pin_id') and p.get('is_pinterest', False)]
+        self._has_pinterest_pins = len(pinterest_pins) > 0
+
         # Show image previews in chat for HITL approval
         if photos:
-            self.chat_display.add_image_preview(photos, f"Found {len(photos)} reference photos:")
+            source = "Pinterest" if self._has_pinterest_pins else "Pexels"
+            self.chat_display.add_image_preview(photos, f"Found {len(photos)} reference photos from {source}:")
+
         self.start_session_button.setEnabled(len(photos) > 0)
+
+        # Enable Pinterest board button only if we have Pinterest pins with valid IDs
+        self.save_to_pinterest_button.setEnabled(self._has_pinterest_pins)
+        if self._has_pinterest_pins:
+            self.save_to_pinterest_button.setToolTip(
+                f"Save {len(pinterest_pins)} Pinterest pins to a new board"
+            )
+        else:
+            self.save_to_pinterest_button.setToolTip(
+                "Only available when images are from Pinterest (not Pexels fallback)"
+            )
 
     def _on_tips(self, tips: dict):
         self.current_tips = tips
@@ -422,6 +486,8 @@ class MainWindow(QMainWindow):
     def _on_no_photos(self):
         self.status_label.setText("No photos found. Try a different search term.")
         self.start_session_button.setEnabled(False)
+        self.save_to_pinterest_button.setEnabled(False)
+        self._has_pinterest_pins = False
 
     def _on_error(self, error: str):
         self.chat_display.add_error_message(error)
@@ -476,3 +542,92 @@ class MainWindow(QMainWindow):
         self.chat_display.add_system_message(
             f"Great session! You practiced for {minutes} minutes with {images} images."
         )
+
+    def _save_to_pinterest_board(self):
+        """Save current Pinterest pins to a new board."""
+        if not self._has_pinterest_pins:
+            QMessageBox.warning(
+                self,
+                "Not Available",
+                "This feature is only available when images are from Pinterest.\n"
+                "The current images are from Pexels (fallback source)."
+            )
+            return
+
+        # Get Pinterest pin IDs from current photos
+        pin_ids = [
+            p.get('pin_id') for p in self.current_photos
+            if p.get('pin_id') and p.get('is_pinterest', False)
+        ]
+
+        if not pin_ids:
+            QMessageBox.warning(
+                self,
+                "No Pinterest Pins",
+                "No valid Pinterest pin IDs found in current images."
+            )
+            return
+
+        # Get board name from user
+        default_name = f"Art Practice - {self.current_theme}" if self.current_theme else "Art Practice References"
+        board_name, ok = QInputDialog.getText(
+            self,
+            "Create Pinterest Board",
+            f"Enter a name for your Pinterest board ({len(pin_ids)} pins):",
+            text=default_name
+        )
+
+        if not ok or not board_name.strip():
+            return
+
+        board_name = board_name.strip()
+
+        # Disable button and show progress
+        self.save_to_pinterest_button.setEnabled(False)
+        self.save_to_pinterest_button.setText("Saving...")
+        self.status_label.setText(f"Creating Pinterest board '{board_name}'...")
+
+        # Create worker thread
+        self.pinterest_board_worker = PinterestBoardWorker(
+            board_name=board_name,
+            pin_ids=pin_ids,
+            description=f"Reference images for {self.current_theme}" if self.current_theme else ""
+        )
+        self.pinterest_board_worker.success.connect(self._on_pinterest_board_success)
+        self.pinterest_board_worker.error.connect(self._on_pinterest_board_error)
+        self.pinterest_board_worker.finished.connect(self._on_pinterest_board_finished)
+        self.pinterest_board_worker.start()
+
+    def _on_pinterest_board_success(self, result: dict):
+        """Handle successful board creation."""
+        saved = result.get('saved_count', 0)
+        total = result.get('total_pins', 0)
+        board_name = result.get('board_name', 'Unknown')
+
+        self.chat_display.add_system_message(
+            f"Pinterest board '{board_name}' created! Saved {saved}/{total} pins."
+        )
+        self.status_label.setText(f"Board created: {saved} pins saved")
+
+        QMessageBox.information(
+            self,
+            "Board Created",
+            f"Successfully created Pinterest board '{board_name}'\n"
+            f"Saved {saved} out of {total} pins."
+        )
+
+    def _on_pinterest_board_error(self, error: str):
+        """Handle board creation error."""
+        self.chat_display.add_error_message(f"Failed to create Pinterest board: {error}")
+        self.status_label.setText("Board creation failed")
+
+        QMessageBox.critical(
+            self,
+            "Error",
+            f"Failed to create Pinterest board:\n{error}"
+        )
+
+    def _on_pinterest_board_finished(self):
+        """Reset button state after board creation attempt."""
+        self.save_to_pinterest_button.setText("Save to Pinterest Board")
+        self.save_to_pinterest_button.setEnabled(self._has_pinterest_pins)

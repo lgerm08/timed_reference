@@ -373,21 +373,32 @@ class PinterestSearcher:
                     # Get alt text
                     alt = img.get_attribute('alt') or f"{query} reference"
 
-                    # Generate unique ID from URL
-                    url_hash = hashlib.md5(high_res_url.encode()).hexdigest()[:12]
-
-                    # Try to find parent link for source URL
+                    # Try to find parent link for source URL and extract pin_id
                     source_url = 'https://www.pinterest.com'
+                    pin_id = None
                     try:
                         parent_link = img.find_element(By.XPATH, './ancestor::a[@href]')
                         href = parent_link.get_attribute('href')
                         if href and '/pin/' in href:
                             source_url = href
+                            # Extract pin_id from URL like /pin/123456789/
+                            import re as re_module
+                            pin_match = re_module.search(r'/pin/(\d+)', href)
+                            if pin_match:
+                                pin_id = pin_match.group(1)
                     except Exception:
                         pass
 
+                    # Generate unique ID - use pin_id if available, else hash
+                    if pin_id:
+                        unique_id = f"pinterest_{pin_id}"
+                    else:
+                        url_hash = hashlib.md5(high_res_url.encode()).hexdigest()[:12]
+                        unique_id = f"pinterest_{url_hash}"
+
                     results.append({
-                        "id": f"pinterest_{url_hash}",
+                        "id": unique_id,
+                        "pin_id": pin_id,  # Actual Pinterest pin ID for repinning
                         "title": alt[:100] if alt else f"{query} reference",
                         "description": f"Pinterest image for {query}",
                         "image_url": high_res_url,
@@ -476,6 +487,163 @@ class PinterestSearcher:
         print(f"[Pinterest MCP] Diverse search returned {len(all_results)} unique images", file=sys.stderr)
         return all_results
 
+    def create_board(self, board_name: str, description: str = "") -> dict[str, Any]:
+        """
+        Create a new Pinterest board.
+
+        Args:
+            board_name: Name for the new board
+            description: Optional board description
+
+        Returns:
+            Dictionary with board info including board_id
+        """
+        if not self.use_real_pinterest:
+            print("[Pinterest MCP] Cannot create board: Pinterest not configured", file=sys.stderr)
+            return {"success": False, "error": "Pinterest credentials not configured"}
+
+        client = self._get_pinterest_client()
+        if not client:
+            return {"success": False, "error": "Failed to initialize Pinterest client"}
+
+        try:
+            # Create the board using py3-pinterest
+            response = client.create_board(name=board_name, description=description)
+            print(f"[Pinterest MCP] Board creation response: {response}", file=sys.stderr)
+
+            # Extract board_id from response
+            import json as json_module
+            if hasattr(response, 'content'):
+                response_data = json_module.loads(response.content)
+                board_id = response_data.get("resource_response", {}).get("data", {}).get("id")
+                if board_id:
+                    return {
+                        "success": True,
+                        "board_id": board_id,
+                        "board_name": board_name,
+                        "message": f"Created board '{board_name}'"
+                    }
+
+            return {"success": True, "board_name": board_name, "message": "Board created"}
+        except Exception as e:
+            print(f"[Pinterest MCP] Failed to create board: {e}", file=sys.stderr)
+            return {"success": False, "error": str(e)}
+
+    def get_boards(self) -> list[dict[str, Any]]:
+        """Get all boards for the authenticated user."""
+        if not self.use_real_pinterest:
+            return []
+
+        client = self._get_pinterest_client()
+        if not client:
+            return []
+
+        try:
+            boards = client.boards()
+            result = []
+            for board in boards:
+                result.append({
+                    "id": board.get("id"),
+                    "name": board.get("name"),
+                    "url": board.get("url"),
+                })
+            return result
+        except Exception as e:
+            print(f"[Pinterest MCP] Failed to get boards: {e}", file=sys.stderr)
+            return []
+
+    def repin_to_board(self, board_id: str, pin_id: str) -> dict[str, Any]:
+        """
+        Repin an existing pin to a board.
+
+        Args:
+            board_id: Target board ID
+            pin_id: Pinterest pin ID to repin
+
+        Returns:
+            Dictionary with success status
+        """
+        if not self.use_real_pinterest:
+            return {"success": False, "error": "Pinterest credentials not configured"}
+
+        client = self._get_pinterest_client()
+        if not client:
+            return {"success": False, "error": "Failed to initialize Pinterest client"}
+
+        try:
+            response = client.repin(board_id=board_id, pin_id=pin_id)
+            print(f"[Pinterest MCP] Repin response for pin {pin_id}: {response}", file=sys.stderr)
+            return {"success": True, "pin_id": pin_id, "board_id": board_id}
+        except Exception as e:
+            print(f"[Pinterest MCP] Failed to repin {pin_id}: {e}", file=sys.stderr)
+            return {"success": False, "error": str(e), "pin_id": pin_id}
+
+    def save_pins_to_board(self, board_name: str, pin_ids: list[str], description: str = "") -> dict[str, Any]:
+        """
+        Create a board and save multiple pins to it.
+
+        Args:
+            board_name: Name for the new board
+            pin_ids: List of Pinterest pin IDs to save
+            description: Optional board description
+
+        Returns:
+            Dictionary with results summary
+        """
+        if not self.use_real_pinterest:
+            return {"success": False, "error": "Pinterest credentials not configured"}
+
+        if not pin_ids:
+            return {"success": False, "error": "No pin IDs provided"}
+
+        # Filter out None/empty pin_ids
+        valid_pin_ids = [pid for pid in pin_ids if pid]
+        if not valid_pin_ids:
+            return {"success": False, "error": "No valid Pinterest pin IDs (images may be from Pexels fallback)"}
+
+        print(f"[Pinterest MCP] Creating board '{board_name}' with {len(valid_pin_ids)} pins", file=sys.stderr)
+
+        # Create the board
+        board_result = self.create_board(board_name, description)
+        if not board_result.get("success"):
+            return board_result
+
+        board_id = board_result.get("board_id")
+        if not board_id:
+            # Try to find the board by name
+            boards = self.get_boards()
+            for board in boards:
+                if board.get("name", "").lower() == board_name.lower():
+                    board_id = board.get("id")
+                    break
+
+        if not board_id:
+            return {"success": False, "error": "Could not get board ID after creation"}
+
+        # Repin all pins to the board
+        saved = 0
+        failed = 0
+        errors = []
+
+        for pin_id in valid_pin_ids:
+            result = self.repin_to_board(board_id, pin_id)
+            if result.get("success"):
+                saved += 1
+            else:
+                failed += 1
+                errors.append(f"Pin {pin_id}: {result.get('error', 'Unknown error')}")
+
+        return {
+            "success": saved > 0,
+            "board_name": board_name,
+            "board_id": board_id,
+            "saved_count": saved,
+            "failed_count": failed,
+            "total_pins": len(valid_pin_ids),
+            "errors": errors[:5] if errors else None,  # Limit error messages
+            "message": f"Saved {saved}/{len(valid_pin_ids)} pins to board '{board_name}'"
+        }
+
 
 # Initialize the MCP server
 app = Server("pinterest-server")
@@ -554,6 +722,37 @@ async def list_tools() -> list[Tool]:
                 "required": ["queries"],
             },
         ),
+        Tool(
+            name="save_pins_to_board",
+            description="""Save Pinterest pins to a new board.
+
+            Creates a new Pinterest board and repins the specified pins to it.
+            This is useful for saving reference images you found during a session.
+
+            Note: Only works with images from Pinterest (not Pexels fallback).
+            Requires Pinterest credentials to be configured.
+            """,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "board_name": {
+                        "type": "string",
+                        "description": "Name for the new Pinterest board",
+                    },
+                    "pin_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of Pinterest pin IDs to save",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional board description",
+                        "default": "",
+                    }
+                },
+                "required": ["board_name", "pin_ids"],
+            },
+        ),
     ]
 
 
@@ -607,6 +806,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(
             type="text",
             text=json.dumps(response, indent=2)
+        )]
+
+    elif name == "save_pins_to_board":
+        board_name = arguments.get("board_name", "")
+        pin_ids = arguments.get("pin_ids", [])
+        description = arguments.get("description", "")
+
+        if not board_name:
+            return [TextContent(
+                type="text",
+                text="Error: board_name parameter is required"
+            )]
+
+        if not pin_ids:
+            return [TextContent(
+                type="text",
+                text="Error: pin_ids parameter is required"
+            )]
+
+        result = searcher.save_pins_to_board(board_name, pin_ids, description)
+
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, indent=2)
         )]
 
     else:
