@@ -1,8 +1,11 @@
 """
 Session setup dialog for configuring practice sessions.
+
+Supports random image selection to avoid repetition.
 """
 
 import sys
+import random
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,6 +28,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QFont
 
 from services.image_cache import image_cache
+from services.session_store import session_store
 
 
 class ThumbnailLoader(QThread):
@@ -42,6 +46,7 @@ class ThumbnailLoader(QThread):
             if self.isInterruptionRequested():
                 break
             try:
+                # Use thumbnail if available, fallback to main url (for Pinterest local paths)
                 thumbnail_url = photo.get("thumbnail") or photo.get("url")
                 if thumbnail_url:
                     path = image_cache.download(thumbnail_url)
@@ -51,8 +56,12 @@ class ThumbnailLoader(QThread):
                             150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation
                         )
                         self.thumbnail_loaded.emit(i, scaled)
+                    else:
+                        print(f"[THUMBNAIL] Pixmap is null for {thumbnail_url}")
             except Exception as e:
-                print(f"Failed to load thumbnail {i}: {e}")
+                print(f"[THUMBNAIL] Failed to load thumbnail {i}: {e}")
+                import traceback
+                traceback.print_exc()
 
         self.finished_loading.emit()
 
@@ -60,13 +69,14 @@ class ThumbnailLoader(QThread):
 class SessionSetupDialog(QDialog):
     """Dialog for configuring the practice session."""
 
-    # Signal emitted when session is configured, passing: photos, duration, play_sound, tips
-    session_configured = Signal(list, int, bool, dict)
+    # Signal emitted when session is configured, passing: photos, duration, play_sound, tips, theme
+    session_configured = Signal(list, int, bool, dict, str)
 
-    def __init__(self, photos: list, tips: dict, parent=None):
+    def __init__(self, photos: list, tips: dict, theme: str = "", parent=None):
         super().__init__(parent)
         self.photos = photos
         self.tips = tips
+        self.theme = theme
         self.selected_photos = list(range(len(photos)))
         self.thumbnail_labels = []
 
@@ -80,7 +90,7 @@ class SessionSetupDialog(QDialog):
         layout = QVBoxLayout(self)
 
         header = QLabel("Configure Your Practice Session")
-        header.setFont(QFont("Arial", 14, QFont.Bold))
+        header.setFont(QFont("Arial", 18, QFont.Bold))
         header.setAlignment(Qt.AlignCenter)
         layout.addWidget(header)
 
@@ -113,7 +123,7 @@ class SessionSetupDialog(QDialog):
         layout.addWidget(timer_frame)
 
         photos_label = QLabel(f"Reference Photos ({len(self.photos)} available):")
-        photos_label.setFont(QFont("Arial", 11, QFont.Bold))
+        photos_label.setFont(QFont("Arial", 13, QFont.Bold))
         layout.addWidget(photos_label)
 
         scroll = QScrollArea()
@@ -206,14 +216,44 @@ class SessionSetupDialog(QDialog):
             self.thumbnail_labels[index].setPixmap(pixmap)
 
     def _start_session(self):
-        import random
-
         photo_count = self.image_count.value()
-        photos_to_use = self.photos[:photo_count]
 
-        if self.shuffle_check.isChecked():
-            photos_to_use = list(photos_to_use)
-            random.shuffle(photos_to_use)
+        # Get recently used images to prefer fresh ones
+        try:
+            recently_used = session_store.get_images_shown_recently(days=3)
+        except Exception:
+            recently_used = set()
+
+        # Separate fresh and recently used photos
+        fresh_photos = []
+        used_photos = []
+        for photo in self.photos:
+            pexels_id = photo.get('id') or photo.get('pexels_id')
+            if pexels_id and pexels_id in recently_used:
+                used_photos.append(photo)
+            else:
+                fresh_photos.append(photo)
+
+        # Prioritize fresh photos, fill remainder with used if needed
+        if len(fresh_photos) >= photo_count:
+            if self.shuffle_check.isChecked():
+                photos_to_use = random.sample(fresh_photos, photo_count)
+            else:
+                photos_to_use = fresh_photos[:photo_count]
+        else:
+            # Use all fresh photos + some used ones
+            photos_to_use = fresh_photos.copy()
+            remaining = photo_count - len(photos_to_use)
+            if remaining > 0 and used_photos:
+                if self.shuffle_check.isChecked():
+                    extra = random.sample(used_photos, min(remaining, len(used_photos)))
+                else:
+                    extra = used_photos[:remaining]
+                photos_to_use.extend(extra)
+
+            # Shuffle the final selection
+            if self.shuffle_check.isChecked():
+                random.shuffle(photos_to_use)
 
         duration = self._get_duration_seconds()
         play_sound = self.sound_check.isChecked()
@@ -224,7 +264,7 @@ class SessionSetupDialog(QDialog):
             self.loader.wait()
 
         # Emit configuration signal - MainWindow will create the session window
-        self.session_configured.emit(photos_to_use, duration, play_sound, self.tips)
+        self.session_configured.emit(photos_to_use, duration, play_sound, self.tips, self.theme)
         self.accept()
 
     def closeEvent(self, event):

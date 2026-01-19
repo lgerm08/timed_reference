@@ -3,3 +3,4 @@ pyside6
 httpx
 python-dotenv
 groq
+markdown

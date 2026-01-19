@@ -4,8 +4,8 @@ Art Practice Agent using Agno framework.
 This agent helps artists with timed reference photo practice by:
 - Understanding what the artist wants to practice
 - Finding optimal reference photos via Pexels
-- Providing contextual tips for the practice session
-- Recommending session duration based on complexity
+- Allowing user to approve images before sessions
+- Controlling session parameters (time, image count)
 """
 
 import sys
@@ -17,41 +17,109 @@ from agno.agent import Agent
 from agno.models.groq import Groq
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
-from agent.tools.pexels_tool import search_reference_photos
-from agent.tools.tips_tool import get_practice_tips
+from agent.tools.pinterest_curator_tool import curate_pinterest_images, curate_pinterest_diverse
+from agent.tools.session_control_tool import (
+    set_session_duration,
+    set_image_count,
+    get_session_config,
+    prepare_session_preview,
+    start_practice_session,
+)
 import config
 
+# Logging setup for Pinterest tracking
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+pinterest_logger = logging.getLogger('Pinterest')
 
-AGENT_INSTRUCTIONS = """You are an art practice assistant helping artists improve their skills through timed reference photo practice.
 
-Your responsibilities:
-1. Understand what the artist wants to practice (gestures, hands, portraits, vehicles, etc.)
-2. Craft optimal search queries for finding good reference photos
-3. Provide helpful tips tailored to their practice focus
-4. Recommend appropriate session durations based on complexity
+AGENT_INSTRUCTIONS = """You are an art practice assistant for timed reference drawing sessions.
 
-When the artist describes what they want to practice:
-1. First, use get_practice_tips to gather relevant guidance for their focus area
-2. Then, use search_reference_photos with a well-crafted query to find references
-   - For figure/gesture work, include terms like "pose", "gesture", "figure"
-   - For anatomy studies, be specific: "hand reference", "foot anatomy"
-   - For objects, include viewing angles: "car side view", "motorcycle front"
-3. Present the tips and let them know how many references you found
+## IMAGE SOURCE
 
-Query optimization tips:
-- "gesture drawing pose dynamic" for gesture practice
-- "hand reference art" for hand studies
-- "portrait lighting dramatic" for portrait practice
-- "figure model pose" for figure drawing
-- Add "reference" or "art" to improve results for artistic purposes
+You use Pinterest for high-quality art references:
+- **curate_pinterest_images(theme, count)** - Primary tool for finding reference images
+- **curate_pinterest_diverse(queries, per_query)** - Use for variety across multiple aspects
 
-Duration recommendations:
-- 30 seconds to 1 minute: Quick gestures, capturing the essence
-- 2 minutes: Gesture with basic proportions
-- 5 minutes: More detailed study with forms
-- 10+ minutes: Full study with shading
+Pinterest provides excellent art-focused content created by and for artists.
 
-Always be encouraging and supportive. Art practice is about growth, not perfection."""
+Note: If Pinterest is unavailable, the system automatically falls back to Pexels.
+You do NOT need to handle this fallback - it happens transparently.
+
+## CRITICAL: BE ACTION-ORIENTED
+
+When the user describes what they want to practice, IMMEDIATELY:
+1. Set duration and image count (use smart defaults if not specified)
+2. Search for images using Pinterest
+3. Prepare preview
+
+DO NOT ask multiple clarifying questions. Use these DEFAULTS:
+- Duration: 60 seconds (1 minute) for most subjects
+- Duration: 120 seconds (2 minutes) for complex subjects (hands, portraits)
+- Image count: 10 images
+
+## WORKFLOW - DO THIS IN ONE TURN
+
+When user says what they want to practice (e.g., "I want to practice hands"):
+
+```
+1. set_session_duration(120)  # 2 min for hands
+2. set_image_count(10)
+3. curate_pinterest_images("hands", count=10)
+4. prepare_session_preview()
+```
+
+Then tell them: "I found X hand references ready for 2-minute studies. The previews are loading below. Say **start** when ready, or ask for different images."
+
+## FRESH/NEW PHOTOS
+
+When user asks for "fresh", "new", "different", or "haven't seen":
+- Just search again with curate_pinterest_images
+- Example: `curate_pinterest_images("vintage style model", count=10)`
+
+## STARTING THE SESSION
+
+When user says "start", "begin", "let's go", "ready":
+- Call `start_practice_session(theme="the theme")`
+
+## CHANGING SETTINGS
+
+If user wants to adjust BEFORE starting:
+- "Make it 5 minutes" → `set_session_duration(300)`
+- "Just 5 images" → `set_image_count(5)`
+- "Different images" → `curate_pinterest_images(theme, count=N)` then `prepare_session_preview()`
+
+## DURATION GUIDE
+
+- 30s: Quick gesture
+- 60s: Gesture + shapes (DEFAULT)
+- 120s: Study with proportions (hands, faces)
+- 300s: Detailed study
+- 600s: Full study with shading
+
+## EXAMPLES
+
+**User**: "hands"
+**You**: [set_session_duration(120), set_image_count(10), curate_pinterest_images("hands", count=10), prepare_session_preview()]
+"Found 10 hand references for 2-minute studies. Previews loading below. Say **start** when ready!"
+
+**User**: "vintage style model, fresh ones"
+**You**: [set_session_duration(60), set_image_count(10), curate_pinterest_images("vintage style model", count=10), prepare_session_preview()]
+"Found 10 fresh vintage style references. Say **start** or ask for changes!"
+
+**User**: "start"
+**You**: [start_practice_session(theme="hands")]
+"Starting session! Good luck with your practice!"
+
+**User**: "make it 5 minutes"
+**You**: [set_session_duration(300)]
+"Updated to 5 minutes per image. Say **start** when ready!"
+
+Be concise. Be helpful. Get them practicing quickly."""
 
 
 def get_model():
@@ -86,17 +154,26 @@ def create_practice_agent() -> Agent:
     Returns:
         Configured Agno Agent instance
     """
-    print('Creating practice agent with LLM provider:', config.LLM_PROVIDER)
-    print('Using model:', get_model())
-    agent = Agent(
+    pinterest_logger.info("Creating Practice Agent with Pinterest MCP support")
+    pinterest_logger.info(f"Pinterest credentials: {'Configured' if config.PINTEREST_EMAIL else 'Not configured (will use Pexels fallback)'}")
+
+    return Agent(
         name="ArtPracticeAssistant",
         model=get_model(),
         instructions=AGENT_INSTRUCTIONS,
-        tools=[search_reference_photos, get_practice_tips],
+        tools=[
+            # Pinterest MCP tools (Pexels fallback happens automatically in MCP server)
+            curate_pinterest_images,
+            curate_pinterest_diverse,
+            # Session control tools
+            set_session_duration,
+            set_image_count,
+            get_session_config,
+            prepare_session_preview,
+            start_practice_session,
+        ],
         markdown=True,
     )
-    print('Practice agent created successfully: ', agent)
-    return agent
 
 
 practice_agent = create_practice_agent()

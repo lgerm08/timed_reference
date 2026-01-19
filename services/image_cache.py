@@ -34,7 +34,17 @@ class ImageCache:
         return None
 
     def download(self, url: str) -> Path:
-        """Download image and return local path. Uses cache if available."""
+        """Download image and return local path. Uses cache if available.
+
+        Also handles local file paths - if the URL is already a local path
+        that exists, it returns that path directly (used by Pinterest MCP).
+        """
+        # Check if this is already a local file path (from Pinterest MCP)
+        if url and not url.startswith(('http://', 'https://')):
+            local_path = Path(url)
+            if local_path.exists():
+                return local_path
+
         cache_path = self._get_cache_path(url)
 
         if cache_path.exists():

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python main.py:*)",
+      "Bash(python3:*)"
+    ]
+  },
+  "mcpServers": {
+    "pinterest": {
+      "command": "python",
+      "args": ["mcp_servers/pinterest_server.py"],
+      "description": "Pinterest image search for art reference"
+    }
+  }
+}

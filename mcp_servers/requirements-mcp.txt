@@ -1,0 +1,15 @@
+# MCP (Model Context Protocol) Dependencies
+# Install with: pip install -r mcp_servers/requirements-mcp.txt
+
+# Core MCP Python SDK
+mcp>=1.0.0
+
+# Async I/O support
+anyio>=4.0.0
+
+# HTTP client for Pinterest API calls
+httpx>=0.27.0
+
+# Optional: For real Pinterest integration (choose one)
+# py3-pinterest>=0.4.0
+# pinterest-api>=0.1.0
